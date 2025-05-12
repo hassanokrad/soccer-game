@@ -1,0 +1,24 @@
+body {
+    font-family: Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-top: 20px;
+    background-color: #f0f0f0;
+}
+canvas {
+    border: 2px solid #333;
+    background-color: #6ABF4B; /* Green field */
+    background-image:
+        linear-gradient(to right, rgba(255,255,255,0.1) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255,255,255,0.1) 1px, transparent 1px);
+    background-size: 50px 50px; /* Grid lines for soccer field appearance */
+}
+#infoArea {
+    margin-bottom: 15px;
+    text-align: center;
+}
+#playerInfo, #scoreBoard, #turnInfo {
+    font-size: 1.1em;
+    margin: 5px 0;
+}
