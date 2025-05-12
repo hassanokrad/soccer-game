@@ -1,24 +1,41 @@
+/* ... (previous styles) ... */
 body {
-    font-family: Arial, sans-serif;
+    font-family: 'Arial', sans-serif; /* Example font */
     display: flex;
     flex-direction: column;
     align-items: center;
-    margin-top: 20px;
-    background-color: #f0f0f0;
+    margin-top: 10px; /* Reduced margin */
+    background-color: #e0e0e0; /* Lighter grey */
+    color: #333;
+    overscroll-behavior: none; /* Prevent pull-to-refresh */
 }
 canvas {
-    border: 2px solid #333;
-    background-color: #6ABF4B; /* Green field */
+    border: 3px solid #555; /* Thicker border */
+    background-color: #5B9E48; /* Darker Green */
+    /* Smoother grid lines */
     background-image:
-        linear-gradient(to right, rgba(255,255,255,0.1) 1px, transparent 1px),
-        linear-gradient(to bottom, rgba(255,255,255,0.1) 1px, transparent 1px);
-    background-size: 50px 50px; /* Grid lines for soccer field appearance */
+        linear-gradient(rgba(255,255,255,0.08) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.08) 1px, transparent 1px);
+    background-size: 40px 40px; /* Smaller grid */
+    touch-action: none;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.2); /* Added shadow */
+    max-width: 100%; /* Ensure canvas doesn't overflow */
+    box-sizing: border-box; /* Include border in width/height */
 }
 #infoArea {
-    margin-bottom: 15px;
+    margin-bottom: 10px;
     text-align: center;
+    background-color: rgba(255, 255, 255, 0.7);
+    padding: 5px 15px;
+    border-radius: 5px;
+     max-width: 90%;
+     box-sizing: border-box;
 }
-#playerInfo, #scoreBoard, #turnInfo {
-    font-size: 1.1em;
-    margin: 5px 0;
+h1 {
+    margin-bottom: 5px;
+    color: #444;
+}
+#playerInfo, #scoreBoard, #selectionInfo, #pauseInfo {
+    font-size: 1em;
+    margin: 3px 0;
 }

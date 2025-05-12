@@ -4,324 +4,413 @@ const WebSocket = require('ws');
 const wss = new WebSocket.Server({ port: 8080 });
 
 let gameInterval;
-let clients = []; // Array to store connected clients
+let clients = [];
 
-// --- Game State (Very Simplified) ---
-let ball = { x: 300, y: 200, radius: 10, vx: 0, vy: 0, color: 'white' };
+// --- Game State ---
+const PLAYER_RADIUS = 15;
+const BALL_RADIUS = 10;
+const CANVAS_WIDTH = 700;
+const CANVAS_HEIGHT = 450;
+const GOAL_COOLDOWN_MS = 3000; // 3 seconds pause after goal
+
+let ball = {
+    id: 'ball', // Added ID for consistency
+    x: CANVAS_WIDTH / 2, y: CANVAS_HEIGHT / 2,
+    radius: BALL_RADIUS, vx: 0, vy: 0, color: 'white'
+};
+
+function createInitialPlayers(teamId, teamColor, side) {
+    const players = [];
+    const y_spacing = CANVAS_HEIGHT / 6;
+    const x_pos = (side === 'left') ? CANVAS_WIDTH * 0.2 : CANVAS_WIDTH * 0.8;
+    for (let i = 0; i < 5; i++) {
+        players.push({
+            id: `${teamId}_${i+1}`,
+            x: x_pos,
+            y: y_spacing * (i + 1),
+            radius: PLAYER_RADIUS, // Include radius here
+            color: teamColor,
+            vx: 0, vy: 0
+        });
+    }
+    return players;
+}
+
 let players = {
-    player1: [ // Team 1
-        { id: 'p1_1', x: 100, y: 100, radius: 15, color: 'blue', isSelected: false },
-        { id: 'p1_2', x: 100, y: 300, radius: 15, color: 'blue', isSelected: false },
-        // Add more players for team 1
-    ],
-    player2: [ // Team 2
-        { id: 'p2_1', x: 500, y: 100, radius: 15, color: 'red', isSelected: false },
-        { id: 'p2_2', x: 500, y: 300, radius: 15, color: 'red', isSelected: false },
-        // Add more players for team 2
-    ]
-};
-let score = { player1: 0, player2: 0 };
-let turn = 'player1'; // 'player1' or 'player2'
-let gameSettings = {
-    canvasWidth: 600,
-    canvasHeight: 400,
-    goal1: { x: 0, y: 150, width: 20, height: 100 },
-    goal2: { x: 580, y: 150, width: 20, height: 100 },
-    friction: 0.98, // Slows down objects
-    kickForceMultiplier: 0.1
+    player1: createInitialPlayers('p1', 'blue', 'left'),
+    player2: createInitialPlayers('p2', 'red', 'right')
 };
 
-console.log("WebSocket server started on port 8080");
+let score = { player1: 0, player2: 0 };
+let gamePaused = false; // Flag for goal cooldown
+let pauseEndTime = 0;
+
+let gameSettings = {
+    canvasWidth: CANVAS_WIDTH,
+    canvasHeight: CANVAS_HEIGHT,
+    goal1: { x: 0, y: CANVAS_HEIGHT * 0.3, width: 20, height: CANVAS_HEIGHT * 0.4 },
+    goal2: { x: CANVAS_WIDTH - 20, y: CANVAS_HEIGHT * 0.3, width: 20, height: CANVAS_HEIGHT * 0.4 },
+    friction: 0.98,
+    kickForceMultiplier: 0.15, // Slightly increased force might feel better for tap-shoot
+    maxSpeed: 15
+};
+
+console.log("Real-time Touch Soccer server started on port 8080");
 
 wss.on('connection', (ws) => {
-    const clientId = Date.now(); // Simple unique ID
-    clients.push({ id: clientId, ws: ws, playerNumber: null });
+    // ... (Connection logic remains the same as before) ...
+    const clientId = Date.now();
+    let assignedPlayerNumber = null;
+
+    if (clients.filter(c => c.playerNumber === 'player1').length === 0) {
+        assignedPlayerNumber = 'player1';
+    } else if (clients.filter(c => c.playerNumber === 'player2').length === 0) {
+        assignedPlayerNumber = 'player2';
+    }
+
+    clients.push({ id: clientId, ws: ws, playerNumber: assignedPlayerNumber });
     console.log(`Client ${clientId} connected.`);
 
-    // Assign player number (very basic - first two connections)
-    if (clients.length === 1) {
-        clients[0].playerNumber = 'player1';
-        ws.send(JSON.stringify({ type: 'playerAssignment', player: 'player1', message: "You are Player 1 (Blue)" }));
-    } else if (clients.length === 2) {
-        clients[1].playerNumber = 'player2';
-        ws.send(JSON.stringify({ type: 'playerAssignment', player: 'player2', message: "You are Player 2 (Red)" }));
-        // Start game or send initial state when two players are connected
-        broadcastGameState();
-        if (!gameInterval) {
-            startGameLoop();
-        }
+     if (assignedPlayerNumber) {
+        ws.send(JSON.stringify({ type: 'playerAssignment', player: assignedPlayerNumber }));
+        console.log(`Client ${clientId} assigned as ${assignedPlayerNumber}`);
     } else {
-        ws.send(JSON.stringify({ type: 'message', message: "Game is full or observer mode." }));
+        ws.send(JSON.stringify({ type: 'message', message: "Observer mode." }));
     }
+
+    if (clients.filter(c => c.playerNumber).length === 2 && !gameInterval) {
+        console.log("Two players connected. Starting game loop.");
+        resetGame(); // Reset score and positions when game starts
+        startGameLoop();
+    }
+
+    broadcastGameState(ws); // Send initial state to new client
 
 
     ws.on('message', (message) => {
         try {
+            // Ignore messages if game is paused during cooldown
+            if (gamePaused) return;
+
             const data = JSON.parse(message);
-            console.log(`Received from client ${clientId}:`, data);
-
             const client = clients.find(c => c.ws === ws);
-            if (!client || !client.playerNumber) return; // Ignore messages from unassigned or unknown clients
+            if (!client || !client.playerNumber) return;
 
-            if (data.type === 'kick' && turn === client.playerNumber) {
+            if (data.type === 'kick') {
                 const { playerId, dx, dy } = data;
                 handleKick(client.playerNumber, playerId, dx, dy);
-                // Switch turn (simple turn-based, or could be real-time with cooldowns)
-                // For simplicity, let's imagine the flick applies and then we wait for things to settle.
-                // A more complex system would handle the physics over time.
-                // turn = (turn === 'player1') ? 'player2' : 'player1'; // Switch turn after kick settles
-                // For now, broadcast immediately. Physics loop will handle movement.
-            } else if (data.type === 'selectPlayer') {
-                if (turn === client.playerNumber) {
-                    handlePlayerSelection(client.playerNumber, data.playerId);
-                }
             }
 
         } catch (error) {
-            console.error("Failed to parse message or handle action:", error);
+            console.error(`Failed to process message from ${client?.playerNumber} (${clientId}):`, error);
         }
     });
 
     ws.on('close', () => {
+        // ... (Disconnect logic remains the same) ...
         clients = clients.filter(c => c.ws !== ws);
-        console.log(`Client ${clientId} disconnected.`);
-        if (clients.length < 2 && gameInterval) {
+        console.log(`Client ${clientId} (${assignedPlayerNumber || 'observer'}) disconnected.`);
+        if (clients.filter(c => c.playerNumber).length < 2 && gameInterval) {
             clearInterval(gameInterval);
             gameInterval = null;
-            console.log("Game paused, waiting for players.");
-            // Optionally reset game state here
+            gamePaused = false; // Ensure pause is reset if player leaves
+            console.log("Game paused/stopped, waiting for players.");
         }
     });
-
-    // Send initial game state to the newly connected client
-    // (or wait until two players are connected)
-    if (clients.length >= 2) {
-        broadcastGameState();
-    }
 });
 
-function handlePlayerSelection(playerTeam, selectedPlayerId) {
-    // Deselect all players for the current team
-    players[playerTeam].forEach(p => p.isSelected = false);
-    // Select the new player
-    const playerToSelect = players[playerTeam].find(p => p.id === selectedPlayerId);
-    if (playerToSelect) {
-        playerToSelect.isSelected = true;
-    }
-    broadcastGameState();
-}
-
 function handleKick(playerTeam, playerId, dx, dy) {
+    // ... (Kick logic is the same - applies force based on dx, dy) ...
     const team = players[playerTeam];
     if (!team) return;
 
-    const player = team.find(p => p.id === playerId && p.isSelected);
+    const player = team.find(p => p.id === playerId);
     if (player) {
-        // Apply force (simplified)
-        player.vx = dx * gameSettings.kickForceMultiplier;
-        player.vy = dy * gameSettings.kickForceMultiplier;
-        // console.log(`Player ${playerId} kicked with force (${player.vx}, ${player.vy})`);
-    }
-    // Server will update and broadcast. Turn switching should be handled more robustly.
-    // For this example, we let the physics loop run and turn switching might be implicit
-    // or handled after objects stop moving.
-}
+        // Normalize the direction vector (dx, dy) and apply force
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        let forceX = 0;
+        let forceY = 0;
+        if (dist > 0.1) { // Avoid division by zero / tiny kicks
+             // Scale force by distance maybe? Or fixed impulse? Let's use fixed impulse + direction
+             const kickStrength = 5; // Adjust this value for kick power
+             forceX = (dx / dist) * kickStrength;
+             forceY = (dy / dist) * kickStrength;
 
+            // Apply impulse directly to velocity
+            player.vx += forceX;
+            player.vy += forceY;
+        }
+
+
+        // Clamp velocity
+        clampVelocity(player);
+    } else {
+        console.warn(`Player ${playerId} not found for team ${playerTeam} during kick.`);
+    }
+}
 
 function updateGamePhysics() {
-    let somethingMoved = false;
-
-    // Update ball
-    ball.x += ball.vx;
-    ball.y += ball.vy;
-    ball.vx *= gameSettings.friction;
-    ball.vy *= gameSettings.friction;
-    if (Math.abs(ball.vx) > 0.01 || Math.abs(ball.vy) > 0.01) somethingMoved = true;
-
-
-    // Update players
-    ['player1', 'player2'].forEach(teamKey => {
-        players[teamKey].forEach(p => {
-            p.x += p.vx;
-            p.y += p.vy;
-            p.vx *= gameSettings.friction;
-            p.vy *= gameSettings.friction;
-            if (Math.abs(p.vx) > 0.01 || Math.abs(p.vy) > 0.01) somethingMoved = true;
-
-
-            // Boundary collisions for players
-            if (p.x - p.radius < 0) { p.x = p.radius; p.vx *= -0.5; }
-            if (p.x + p.radius > gameSettings.canvasWidth) { p.x = gameSettings.canvasWidth - p.radius; p.vx *= -0.5; }
-            if (p.y - p.radius < 0) { p.y = p.radius; p.vy *= -0.5; }
-            if (p.y + p.radius > gameSettings.canvasHeight) { p.y = gameSettings.canvasHeight - p.radius; p.vy *= -0.5; }
-        });
-    });
-
-    // Collisions (very basic placeholder)
-    handleCollisions();
-
-    // Goal Check
-    checkGoal();
-
-    if (!somethingMoved && turn !== null) { // If nothing is moving and game is active
-        // This is a very simplistic way to switch turns.
-        // A better approach would be to wait for a "settled" state.
-        // For now, if a kick happened and things stopped, THEN switch turn.
-        // This needs to be refined. For a flick game, the turn ends when all pieces stop.
-    }
-}
-
-function handleCollisions() {
     const allPucks = [...players.player1, ...players.player2, ball];
 
+    // Update positions and apply friction
+     allPucks.forEach(p => {
+        if (!p) return; // Safety check
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vx *= gameSettings.friction;
+        p.vy *= gameSettings.friction;
+        if (Math.abs(p.vx) < 0.05) p.vx = 0;
+        if (Math.abs(p.vy) < 0.05) p.vy = 0;
+    });
+
+
+    handleCollisions(allPucks);
+    checkBoundaries(allPucks);
+    checkGoal(); // Checks for goal and initiates pause if needed
+}
+
+// --- Collision, Boundary, ClampVelocity functions remain the same ---
+function handleCollisions(allPucks) {
+     // Simple Circle-Circle Collision Response
     for (let i = 0; i < allPucks.length; i++) {
         for (let j = i + 1; j < allPucks.length; j++) {
             const puckA = allPucks[i];
             const puckB = allPucks[j];
+             if (!puckA || !puckB) continue; // Safety check
 
             const dx = puckB.x - puckA.x;
             const dy = puckB.y - puckA.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
+            const distanceSq = dx * dx + dy * dy; // Use squared distance
             const minDistance = puckA.radius + puckB.radius;
+            const minDistanceSq = minDistance * minDistance;
 
-            if (distance < minDistance) {
-                // Basic collision response: elastic collision
-                // Normal vector
+            if (distanceSq < minDistanceSq && distanceSq > 0.001) { // Check for overlap and avoid division by zero
+                const distance = Math.sqrt(distanceSq);
+                // Normal vector (normalized)
                 const nx = dx / distance;
                 const ny = dy / distance;
 
-                // Tangent vector
-                const tx = -ny;
-                const ty = nx;
-
-                // Dot product tangent
-                const dpTanA = puckA.vx * tx + puckA.vy * ty;
-                const dpTanB = puckB.vx * tx + puckB.vy * ty;
-
-                // Dot product normal
-                const dpNormA = puckA.vx * nx + puckA.vy * ny;
-                const dpNormB = puckB.vx * nx + puckB.vy * ny;
-
-                // Conservation of momentum in 1D (normal direction)
-                // Assuming equal mass for simplicity here, otherwise use m1, m2
-                const m1 = (puckA === ball) ? 0.5 : 1; // Ball is lighter
-                const m2 = (puckB === ball) ? 0.5 : 1;
-
-                const p = (dpNormA * m1 + dpNormB * m2) / (m1 + m2);
-                const v1Prime = dpNormA + 2 * (p - dpNormA); // For puckA
-                const v2Prime = dpNormB + 2 * (p - dpNormB); // For puckB
-
-
-                puckA.vx = tx * dpTanA + nx * v1Prime;
-                puckA.vy = ty * dpTanA + ny * v1Prime;
-                puckB.vx = tx * dpTanB + nx * v2Prime;
-                puckB.vy = ty * dpTanB + ny * v2Prime;
-
-                // Separation to prevent sticking
-                const overlap = 0.5 * (minDistance - distance);
+                // --- Resolve overlap ---
+                const overlap = (minDistance - distance) * 0.5; // How much to move each puck
                 puckA.x -= overlap * nx;
                 puckA.y -= overlap * ny;
                 puckB.x += overlap * nx;
                 puckB.y += overlap * ny;
+
+                // --- Collision response (using relative velocity) ---
+                 // Relative velocity
+                const rvx = puckA.vx - puckB.vx;
+                const rvy = puckA.vy - puckB.vy;
+
+                // Velocity component along the normal
+                const velAlongNormal = rvx * nx + rvy * ny;
+
+                // Do not resolve if velocities are separating
+                if (velAlongNormal > 0) continue;
+
+                // Calculate impulse scalar (simplified elastic collision, assuming mass = radius^2 for differentiation)
+                const massA = (puckA.id === 'ball' ? BALL_RADIUS : PLAYER_RADIUS) ** 2; // Use consistent radii
+                const massB = (puckB.id === 'ball' ? BALL_RADIUS : PLAYER_RADIUS) ** 2;
+                const restitution = 0.8; // Bounciness (0-1)
+
+                let impulseScalar = -(1 + restitution) * velAlongNormal;
+                impulseScalar /= (1 / massA + 1 / massB);
+
+                // Apply impulse
+                const impulseX = impulseScalar * nx;
+                const impulseY = impulseScalar * ny;
+
+                puckA.vx += (1 / massA) * impulseX;
+                puckA.vy += (1 / massA) * impulseY;
+                puckB.vx -= (1 / massB) * impulseX;
+                puckB.vy -= (1 / massB) * impulseY;
+
+                 // Clamp velocities after collision
+                clampVelocity(puckA);
+                clampVelocity(puckB);
+
             }
         }
     }
+}
+function clampVelocity(puck) {
+     if (!puck) return;
+     const speed = Math.sqrt(puck.vx * puck.vx + puck.vy * puck.vy);
+        if (speed > gameSettings.maxSpeed) {
+            const factor = gameSettings.maxSpeed / speed;
+            puck.vx *= factor;
+            puck.vy *= factor;
+        }
+}
+function checkBoundaries(allPucks) {
+    allPucks.forEach(p => {
+        if (!p) return; // Safety check
+        let bounced = false;
+        const restitution = 0.6; // How much energy is lost on bounce
+        const goal1 = gameSettings.goal1;
+        const goal2 = gameSettings.goal2;
+        const isBall = (p.id === 'ball'); // Check if the current puck is the ball
 
-    // Boundary for ball
-    if (ball.x - ball.radius < 0) {
-        ball.x = ball.radius;
-        ball.vx *= -0.7; // Dampen on wall hit
-    }
-    if (ball.x + ball.radius > gameSettings.canvasWidth) {
-        ball.x = gameSettings.canvasWidth - ball.radius;
-        ball.vx *= -0.7;
-    }
-    if (ball.y - ball.radius < 0) {
-        ball.y = ball.radius;
-        ball.vy *= -0.7;
-    }
-    if (ball.y + ball.radius > gameSettings.canvasHeight) {
-        ball.y = gameSettings.canvasHeight - ball.radius;
-        ball.vy *= -0.7;
-    }
+        // --- Top / Bottom Wall Collision (Same for Ball and Players) ---
+        if (p.y - p.radius < 0) {
+            p.y = p.radius;
+            p.vy *= -restitution;
+            bounced = true;
+        }
+        if (p.y + p.radius > gameSettings.canvasHeight) {
+            p.y = gameSettings.canvasHeight - p.radius;
+            p.vy *= -restitution;
+            bounced = true;
+        }
+
+        // --- Left Wall / Goal 1 Collision ---
+        if (p.x - p.radius < 0) {
+            // Allow ball to enter goal if within vertical bounds
+            if (isBall && p.y > goal1.y && p.y < goal1.y + goal1.height) {
+                // Ball is entering goal - goal check will handle scoring. Don't bounce here.
+                // But DO prevent it going through the *back* of the net (if x gets way too small)
+                if (p.x < -p.radius * 2) { // Heuristic: prevent deep goal penetration
+                     p.x = -p.radius * 2;
+                     p.vx = 0; // Stop it
+                }
+            } else {
+                // Player hits goal line OR Ball hits wall outside goal height: Bounce.
+                p.x = p.radius;
+                p.vx *= -restitution;
+                bounced = true;
+            }
+        }
+
+        // --- Right Wall / Goal 2 Collision ---
+        if (p.x + p.radius > gameSettings.canvasWidth) {
+             // Allow ball to enter goal if within vertical bounds
+             if (isBall && p.y > goal2.y && p.y < goal2.y + goal2.height) {
+                 // Ball is entering goal. Prevent deep penetration.
+                 if (p.x > gameSettings.canvasWidth + p.radius * 2) {
+                     p.x = gameSettings.canvasWidth + p.radius * 2;
+                     p.vx = 0;
+                 }
+            } else {
+                 // Player hits goal line OR Ball hits wall outside goal height: Bounce.
+                p.x = gameSettings.canvasWidth - p.radius;
+                p.vx *= -restitution;
+                bounced = true;
+            }
+        }
+
+        // Clamp velocity if a bounce occurred
+        if (bounced) clampVelocity(p);
+    });
 }
 
+// ---------------------------------------------------------------------
 
 function checkGoal() {
-    const { goal1, goal2, canvasWidth } = gameSettings;
+    const { goal1, goal2 } = gameSettings;
     let goalScored = false;
 
-    // Player 2 scores in Player 1's goal
-    if (ball.x - ball.radius < goal1.x + goal1.width && // Ball's left edge past goal line
-        ball.x + ball.radius > goal1.x &&             // Ball's right edge not past far post
-        ball.y > goal1.y &&
-        ball.y < goal1.y + goal1.height) {
+    // Check goal 1 (P2 scores)
+    if (ball.x < goal1.x + goal1.width && // Center of ball past goal line
+        ball.y > goal1.y && ball.y < goal1.y + goal1.height)
+    {
         score.player2++;
-        console.log("Goal for Player 2! Score:", score);
+        console.log(`Goal P2! Score: ${score.player1}-${score.player2}`);
         goalScored = true;
-        turn = 'player1'; // Player 1 starts next
     }
-    // Player 1 scores in Player 2's goal
-    else if (ball.x + ball.radius > goal2.x &&           // Ball's right edge past goal line
-             ball.x - ball.radius < goal2.x + goal2.width && // Ball's left edge not past far post
-             ball.y > goal2.y &&
-             ball.y < goal2.y + goal2.height) {
+    // Check goal 2 (P1 scores)
+    else if (ball.x > goal2.x && // Center of ball past goal line
+             ball.y > goal2.y && ball.y < goal2.y + goal2.height)
+    {
         score.player1++;
-        console.log("Goal for Player 1! Score:", score);
+        console.log(`Goal P1! Score: ${score.player1}-${score.player2}`);
         goalScored = true;
-        turn = 'player2'; // Player 2 starts next
     }
 
     if (goalScored) {
-        resetPositions();
-        broadcastGameState(); // Ensure score and turn update is sent
+        gamePaused = true; // Pause the game
+        pauseEndTime = Date.now() + GOAL_COOLDOWN_MS;
+        console.log(`Game paused for ${GOAL_COOLDOWN_MS / 1000}s`);
+        resetPositionsAfterGoal(); // Reset positions
+        broadcastGameState(); // Broadcast the score update and paused state
     }
 }
 
-function resetPositions() {
+function resetPositionsAfterGoal() {
+    // Reset ball
     ball.x = gameSettings.canvasWidth / 2;
     ball.y = gameSettings.canvasHeight / 2;
-    ball.vx = 0;
-    ball.vy = 0;
-
-    // Reset player positions (example, could be more structured)
-    players.player1[0] = { ...players.player1[0], x: 100, y: 100, vx: 0, vy: 0, isSelected: false };
-    players.player1[1] = { ...players.player1[1], x: 100, y: 300, vx: 0, vy: 0, isSelected: false };
-    players.player2[0] = { ...players.player2[0], x: gameSettings.canvasWidth - 100, y: 100, vx: 0, vy: 0, isSelected: false };
-    players.player2[1] = { ...players.player2[1], x: gameSettings.canvasWidth - 100, y: 300, vx: 0, vy: 0, isSelected: false };
-
-    // Potentially deselect all players
-    players.player1.forEach(p => p.isSelected = false);
-    players.player2.forEach(p => p.isSelected = false);
+    ball.vx = 0; ball.vy = 0;
+    // Reset players
+    players.player1 = createInitialPlayers('p1', 'blue', 'left');
+    players.player2 = createInitialPlayers('p2', 'red', 'right');
 }
 
+function resetGame() { // Full reset
+     score.player1 = 0; score.player2 = 0;
+     resetPositionsAfterGoal();
+     gamePaused = false; // Ensure not paused on full reset
+     pauseEndTime = 0;
+     console.log("Game reset.");
+     // Don't broadcast here, let the calling context do it if needed
+}
 
-function broadcastGameState() {
+function broadcastGameState(targetWs = null) {
+    // Ensure radii are included!
+    const mapPlayerState = p => ({
+        id: p.id,
+        x: parseFloat(p.x.toFixed(1)), y: parseFloat(p.y.toFixed(1)),
+        vx: parseFloat(p.vx.toFixed(1)), vy: parseFloat(p.vy.toFixed(1)),
+        r: p.radius // Include radius!
+    });
+
     const state = {
         type: 'gameState',
-        ball,
-        players,
-        score,
-        turn,
-        gameSettings
+        b: { // Ball state
+            id: ball.id,
+            x: parseFloat(ball.x.toFixed(1)), y: parseFloat(ball.y.toFixed(1)),
+            vx: parseFloat(ball.vx.toFixed(1)), vy: parseFloat(ball.vy.toFixed(1)),
+            r: ball.radius // Include radius!
+         },
+        p1: players.player1.map(mapPlayerState),
+        p2: players.player2.map(mapPlayerState),
+        s: score,
+        p: gamePaused, // Paused state (boolean)
+        gs: gameSettings // Send settings (client needs dimensions etc.)
     };
     const jsonState = JSON.stringify(state);
-    clients.forEach(client => {
-        if (client.ws.readyState === WebSocket.OPEN) {
-            client.ws.send(jsonState);
-        }
-    });
+
+    if (targetWs) {
+        if (targetWs.readyState === WebSocket.OPEN) targetWs.send(jsonState);
+    } else {
+        clients.forEach(client => {
+            if (client.ws.readyState === WebSocket.OPEN) client.ws.send(jsonState);
+        });
+    }
 }
 
 function startGameLoop() {
     if (gameInterval) clearInterval(gameInterval);
+    console.log("Starting game loop (60Hz)");
     gameInterval = setInterval(() => {
-        if (clients.length >= 2) { // Only run if we have enough players
-            updateGamePhysics();
-            broadcastGameState();
+        if (clients.filter(c => c.playerNumber).length < 2) {
+             clearInterval(gameInterval); gameInterval = null; return;
         }
-    }, 1000 / 60); // 60 FPS
-}
 
-// Initial call to reset positions if needed before game starts or on server restart
-resetPositions();
+        const now = Date.now();
+        // Check if game should unpause
+        if (gamePaused && now > pauseEndTime) {
+            gamePaused = false;
+            console.log("Game unpaused.");
+            // Broadcast unpaused state immediately before physics run
+             broadcastGameState();
+        }
+
+        // Only run physics and broadcast if not paused
+        if (!gamePaused) {
+            updateGamePhysics();
+            broadcastGameState(); // Broadcast updated state
+        }
+        // If paused, do nothing this tick (effectively pauses physics/updates)
+
+    }, 1000 / 60); // ~60 FPS
+}
